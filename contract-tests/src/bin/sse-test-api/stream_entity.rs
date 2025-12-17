@@ -44,7 +44,7 @@ impl Inner {
                         break;
                     }
                 }
-                Ok(None) => continue,
+                Ok(None) => break,
                 Err(e) => {
                     let failure = EventType::Error {
                         error: format!("Error: {:?}", e),
@@ -52,11 +52,6 @@ impl Inner {
 
                     if !self.send_message(failure, &client).await {
                         break;
-                    }
-
-                    match e {
-                        es::Error::StreamClosed => break,
-                        _ => continue,
                     }
                 }
             };

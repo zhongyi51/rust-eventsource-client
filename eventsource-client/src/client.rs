@@ -18,7 +18,7 @@ use std::{
     fmt::{self, Debug, Formatter},
     future::Future,
     io::ErrorKind,
-    pin::Pin,
+    pin::{pin, Pin},
     str::FromStr,
     task::{Context, Poll},
     time::{Duration, Instant},
@@ -450,7 +450,7 @@ where
 
             let state = this.state.project();
             match state {
-                StateProj::StreamClosed => return Poll::Ready(Some(Err(Error::StreamClosed))),
+                StateProj::StreamClosed => return Poll::Ready(None),
                 // New immediately transitions to Connecting, and exists only
                 // to ensure that we only connect when polled.
                 StateProj::New => {
@@ -517,30 +517,49 @@ where
                             }
                         }
 
-                        self.as_mut().reset_redirects();
-                        self.as_mut().project().state.set(State::New);
-
-                        return Poll::Ready(Some(Err(Error::UnexpectedResponse(
+                        let error = Error::UnexpectedResponse(
                             Response::new(resp.status(), resp.headers().clone()),
                             ErrorBody::new(resp.into_body()),
-                        ))));
-                    }
-                    Err(e) => {
-                        // This happens when the server is unreachable, e.g. connection refused.
-                        warn!("request returned an error: {}", e);
+                        );
+
                         if !*retry {
-                            self.as_mut().project().state.set(State::New);
-                            return Poll::Ready(Some(Err(Error::HttpStream(Box::new(e)))));
+                            self.as_mut().project().state.set(State::StreamClosed);
+                            return Poll::Ready(Some(Err(error)));
                         }
+
+                        self.as_mut().reset_redirects();
+
                         let duration = self
                             .as_mut()
                             .project()
                             .retry_strategy
                             .next_delay(Instant::now());
+
                         self.as_mut()
                             .project()
                             .state
-                            .set(State::WaitingToReconnect(delay(duration, "retrying")))
+                            .set(State::WaitingToReconnect(delay(duration, "retrying")));
+
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                    Err(e) => {
+                        // This happens when the server is unreachable, e.g. connection refused.
+                        warn!("request returned an error: {}", e);
+                        if !*retry {
+                            self.as_mut().project().state.set(State::StreamClosed);
+                            return Poll::Ready(Some(Err(Error::HttpStream(Box::new(e)))));
+                        }
+
+                        let duration = self
+                            .as_mut()
+                            .project()
+                            .retry_strategy
+                            .next_delay(Instant::now());
+
+                        self.as_mut()
+                            .project()
+                            .state
+                            .set(State::WaitingToReconnect(delay(duration, "retrying")));
                     }
                 },
                 StateProj::FollowingRedirect(maybe_header) => match uri_from_header(maybe_header) {
@@ -664,5 +683,85 @@ mod tests {
             .expect("unable to create expected header");
 
         assert_eq!(Some(&expected), actual);
+    }
+
+    use std::{pin::pin, str::FromStr, time::Duration};
+
+    use futures::TryStreamExt;
+    use hyper::{client::HttpConnector, Body, HeaderMap, Request, Uri};
+    use hyper_timeout::TimeoutConnector;
+    use tokio::time::timeout;
+
+    use crate::{
+        client::{RequestProps, State},
+        ReconnectOptionsBuilder, ReconnectingRequest,
+    };
+
+    const INVALID_URI: &'static str = "http://mycrazyunexsistenturl.invaliddomainext";
+
+    #[test_case(INVALID_URI, false, |state| matches!(state, State::StreamClosed))]
+    #[test_case(INVALID_URI, true, |state| matches!(state, State::WaitingToReconnect(_)))]
+    #[tokio::test]
+    async fn initial_connection(uri: &str, retry_initial: bool, expected: fn(&State) -> bool) {
+        let default_timeout = Some(Duration::from_secs(1));
+        let conn = HttpConnector::new();
+        let mut connector = TimeoutConnector::new(conn);
+        connector.set_connect_timeout(default_timeout);
+        connector.set_read_timeout(default_timeout);
+        connector.set_write_timeout(default_timeout);
+
+        let reconnect_opts = ReconnectOptionsBuilder::new(false)
+            .backoff_factor(1)
+            .delay(Duration::from_secs(1))
+            .retry_initial(retry_initial)
+            .build();
+
+        let http = hyper::Client::builder().build::<_, hyper::Body>(connector);
+        let req_props = RequestProps {
+            url: Uri::from_str(uri).unwrap(),
+            headers: HeaderMap::new(),
+            method: "GET".to_string(),
+            body: None,
+            reconnect_opts,
+            max_redirects: 10,
+        };
+
+        let mut reconnecting_request = ReconnectingRequest::new(http, req_props, None);
+
+        // sets initial state
+        let resp = reconnecting_request.http.request(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        );
+
+        reconnecting_request.state = State::Connecting {
+            retry: reconnecting_request.props.reconnect_opts.retry_initial,
+            resp,
+        };
+
+        let mut reconnecting_request = pin!(reconnecting_request);
+
+        timeout(Duration::from_millis(500), reconnecting_request.try_next())
+            .await
+            .ok();
+
+        assert!(expected(&reconnecting_request.state));
+    }
+
+    #[test_case(false, |state| matches!(state, State::StreamClosed))]
+    #[test_case(true, |state| matches!(state, State::WaitingToReconnect(_)))]
+    #[tokio::test]
+    async fn initial_connection_mocked_server(retry_initial: bool, expected: fn(&State) -> bool) {
+        let mut mock_server = mockito::Server::new_async().await;
+        let _mock = mock_server
+            .mock("GET", "/")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        initial_connection(&mock_server.url(), retry_initial, expected).await;
     }
 }

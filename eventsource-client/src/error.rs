@@ -30,7 +30,6 @@ impl std::error::Error for HeaderError {
 #[derive(Debug)]
 pub enum Error {
     TimedOut,
-    StreamClosed,
     /// An invalid request parameter
     InvalidParameter(Box<dyn std::error::Error + Send + Sync + 'static>),
     /// The HTTP response could not be handled.
@@ -56,7 +55,6 @@ impl std::fmt::Display for Error {
         use Error::*;
         match self {
             TimedOut => write!(f, "timed out"),
-            StreamClosed => write!(f, "stream closed"),
             InvalidParameter(err) => write!(f, "invalid parameter: {err}"),
             UnexpectedResponse(r, _) => {
                 let status = r.status();
