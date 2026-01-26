@@ -4,6 +4,7 @@ use std::{env, process, time::Duration};
 use eventsource_client as es;
 
 #[tokio::main]
+#[allow(clippy::result_large_err)]
 async fn main() -> Result<(), es::Error> {
     env_logger::init();
 
@@ -47,8 +48,8 @@ fn tail_events(client: impl es::Client) -> impl Stream<Item = Result<(), ()>> {
                 println!("got an event: {}\n{}", ev.event_type, ev.data)
             }
             es::SSE::Comment(comment) => {
-                println!("got a comment: \n{}", comment)
+                println!("got a comment: \n{comment}")
             }
         })
-        .map_err(|err| eprintln!("error streaming events: {:?}", err))
+        .map_err(|err| eprintln!("error streaming events: {err:?}"))
 }
