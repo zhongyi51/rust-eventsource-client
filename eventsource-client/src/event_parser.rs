@@ -161,12 +161,10 @@ fn try_consume_bom_header(buf: &[u8]) -> Option<&[u8]> {
         } else {
             Some(buf)
         }
+    } else if buf.starts_with(BOM_HEADER) {
+        Some(&buf[BOM_HEADER.len()..])
     } else {
-        if buf.starts_with(BOM_HEADER) {
-            Some(&buf[BOM_HEADER.len()..])
-        } else {
-            Some(buf)
-        }
+        Some(buf)
     }
 }
 
@@ -224,7 +222,7 @@ impl EventParser {
         if let BomHeaderState::Parsing(header_buf) = &mut self.bom_header_state {
             header_buf.extend_from_slice(&bytes);
             if let Some(rest) = try_consume_bom_header(header_buf) {
-                let owned_rest=rest.to_vec();
+                let owned_rest = rest.to_vec();
                 self.bom_header_state = BomHeaderState::Consumed;
                 // Once the BOM header is consumed, we can process the rest of the bytes.
                 self.decode_and_buffer_lines(Bytes::from_owner(owned_rest));
@@ -771,10 +769,14 @@ mod tests {
     fn test_event_parser_with_bom_header_split_across_chunks() {
         let mut parser = EventParser::new();
         // First chunk: partial BOM
-        assert!(parser.process_bytes(Bytes::from(b"\xEF\xBB".as_slice())).is_ok());
+        assert!(parser
+            .process_bytes(Bytes::from(b"\xEF\xBB".as_slice()))
+            .is_ok());
         assert!(parser.get_event().is_none());
         // Second chunk: rest of BOM + data
-        assert!(parser.process_bytes(Bytes::from(b"\xBFdata: hello\n\n".as_slice())).is_ok());
+        assert!(parser
+            .process_bytes(Bytes::from(b"\xBFdata: hello\n\n".as_slice()))
+            .is_ok());
         assert_eq!(parser.get_event(), Some(event("message", "hello")));
         assert!(parser.get_event().is_none());
     }
@@ -783,9 +785,11 @@ mod tests {
     fn test_event_parser_second_bom_should_fail() {
         let mut parser = EventParser::new();
         // First event with BOM - should succeed
-        assert!(parser.process_bytes(Bytes::from(b"\xEF\xBB\xBFdata: first\n\n".as_slice())).is_ok());
+        assert!(parser
+            .process_bytes(Bytes::from(b"\xEF\xBB\xBFdata: first\n\n".as_slice()))
+            .is_ok());
         assert_eq!(parser.get_event(), Some(event("message", "first")));
-        
+
         // Second event with BOM - should fail (only first message can have BOM)
         let result = parser.process_bytes(Bytes::from(b"\xEF\xBB\xBFdata: second\n\n".as_slice()));
         assert!(result.is_err());
