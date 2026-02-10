@@ -217,30 +217,34 @@ impl EventParser {
     pub fn process_bytes(&mut self, bytes: Bytes) -> Result<()> {
         trace!("Parsing bytes {bytes:?}");
 
-        // Accoring to the SSE spec, a BOM header may be present at the beginning of the stream,
+        // According to the SSE spec, a BOM header may be present at the beginning of the stream,
         // which must be stripped before the message processing.
-        if let BomHeaderState::Parsing(header_buf) = &mut self.bom_header_state {
-            header_buf.extend_from_slice(&bytes);
-            if let Some(rest) = try_consume_bom_header(header_buf) {
-                let owned_rest = rest.to_vec();
-                self.bom_header_state = BomHeaderState::Consumed;
-                // Once the BOM header is consumed, we can process the rest of the bytes.
-                self.decode_and_buffer_lines(Bytes::from_owner(owned_rest));
-                self.parse_complete_lines_into_event()?;
-            }
-        } else {
-            // We get bytes from the underlying stream in chunks.  Decoding a chunk has two phases:
-            // decode the chunk into lines, and decode the lines into events.
-            //
-            // We counterintuitively do these two phases in reverse order. Because both lines and
-            // events may be split across chunks, we need to ensure we have a complete
-            // (newline-terminated) line before parsing it, and a complete event
-            // (empty-line-terminated) before returning it. So we buffer lines between poll()
-            // invocations, and begin by processing any incomplete events from previous invocations,
-            // before requesting new input from the underlying stream and processing that.
-            self.decode_and_buffer_lines(bytes);
-            self.parse_complete_lines_into_event()?;
-        }
+        let bytes_to_process =
+            if let BomHeaderState::Parsing(header_buf) = &mut self.bom_header_state {
+                header_buf.extend_from_slice(&bytes);
+                if let Some(rest) = try_consume_bom_header(header_buf) {
+                    let owned_rest = rest.to_vec();
+                    self.bom_header_state = BomHeaderState::Consumed;
+                    // Once the BOM header is consumed, we can process the rest of the bytes.
+                    Bytes::from_owner(owned_rest)
+                } else {
+                    return Ok(());
+                }
+            } else {
+                bytes
+            };
+
+        // We get bytes from the underlying stream in chunks.  Decoding a chunk has two phases:
+        // decode the chunk into lines, and decode the lines into events.
+        //
+        // We counterintuitively do these two phases in reverse order. Because both lines and
+        // events may be split across chunks, we need to ensure we have a complete
+        // (newline-terminated) line before parsing it, and a complete event
+        // (empty-line-terminated) before returning it. So we buffer lines between poll()
+        // invocations, and begin by processing any incomplete events from previous invocations,
+        // before requesting new input from the underlying stream and processing that.
+        self.decode_and_buffer_lines(bytes_to_process);
+        self.parse_complete_lines_into_event()?;
 
         Ok(())
     }
